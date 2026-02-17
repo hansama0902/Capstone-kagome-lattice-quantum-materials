@@ -29,6 +29,7 @@ export default function OptimizationPanel({
   const [nInitial, setNInitial] = useState(5);
   const [nIterations, setNIterations] = useState(10);
   const [isRunning, setIsRunning] = useState(false);
+  const [autoRun, setAutoRun] = useState(true);  // Auto-run all iterations
 
   const hasTarget = targetDOS && targetDOS.dos && targetDOS.bins;
 
@@ -39,6 +40,27 @@ export default function OptimizationPanel({
     }
     setIsRunning(true);
     await onStartOptimization(nInitial, nIterations);
+    
+    // If auto-run is enabled, continue stepping
+    if (autoRun) {
+      runAllIterations();
+    }
+  };
+
+  const runAllIterations = async () => {
+    // Auto-run all remaining iterations
+    const totalIter = nIterations;
+    for (let i = 0; i < totalIter; i++) {
+      try {
+        await onStepOptimization();
+        // Small delay to avoid overwhelming the backend
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (error) {
+        console.error('Error in auto-iteration:', error);
+        break;
+      }
+    }
+    setIsRunning(false);
   };
 
   const handleStep = async () => {
@@ -56,15 +78,15 @@ export default function OptimizationPanel({
 
   return (
     <Paper elevation={3} sx={{ p: 3 }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-        <SettingsIcon sx={{ mr: 1 }} />
-        <Typography variant="h6">
+      <Box sx={{ display: 'flex', alignItems: 'center', mb: 3 }}>
+        <SettingsIcon sx={{ mr: 1, fontSize: 28, color: 'primary.main' }} />
+        <Typography variant="h5" sx={{ fontWeight: 600 }}>
           Bayesian Optimization
         </Typography>
       </Box>
 
       {!hasTarget && (
-        <Alert severity="info" sx={{ mb: 2 }}>
+        <Alert severity="info" sx={{ mb: 3 }}>
           Please generate a target DOS using the parameter controls first
         </Alert>
       )}
@@ -101,13 +123,14 @@ export default function OptimizationPanel({
       {optimizationStatus?.status && (
         <Box sx={{ mb: 2 }}>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
-            <Typography variant="body2">
-              Status: <Chip 
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Typography variant="body2">Status:</Typography>
+              <Chip 
                 label={optimizationStatus.status} 
                 size="small" 
                 color={optimizationStatus.status === 'running' ? 'primary' : 'default'}
               />
-            </Typography>
+            </Box>
             {optimizationStatus.current_iteration !== undefined && (
               <Typography variant="body2">
                 Iteration: {optimizationStatus.current_iteration} / {optimizationStatus.total_iterations}

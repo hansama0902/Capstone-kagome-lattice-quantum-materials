@@ -12,6 +12,7 @@ import {
   Box,
   Grid,
   TextField,
+  Chip,
 } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 
@@ -29,19 +30,27 @@ export default function ParameterControls({ onComputeDOS, onGenerateTarget, load
 
   return (
     <Paper elevation={3} sx={{ p: 3 }}>
-      <Typography variant="h6" gutterBottom>
-        Hamiltonian Parameters
+      <Typography variant="h5" gutterBottom sx={{ fontWeight: 600, mb: 3 }}>
+        ⚙️ Hamiltonian Parameters
       </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 4 }}>
         Adjust tight-binding parameters for Kagome lattice
       </Typography>
 
       <Box sx={{ mb: 4 }}>
-        <Typography gutterBottom>
-          t_a (Nearest-neighbor hopping): {t_a.toFixed(3)}
-        </Typography>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+          <Typography sx={{ fontWeight: 500 }}>
+            t_a (Nearest-neighbor)
+          </Typography>
+          <Chip 
+            label={t_a.toFixed(3)} 
+            color="primary" 
+            size="small"
+            sx={{ fontWeight: 'bold', minWidth: 70 }}
+          />
+        </Box>
         <Grid container spacing={2} alignItems="center">
-          <Grid item xs={10}>
+          <Grid item xs={9}>
             <Slider
               value={t_a}
               onChange={(e, newValue) => setT_a(newValue)}
@@ -54,27 +63,37 @@ export default function ParameterControls({ onComputeDOS, onGenerateTarget, load
                 { value: 0.5, label: '0.5' },
               ]}
               disabled={loading}
+              sx={{ '& .MuiSlider-markLabel': { fontSize: 11 } }}
             />
           </Grid>
-          <Grid item xs={2}>
+          <Grid item xs={3}>
             <TextField
               size="small"
               type="number"
               value={t_a}
-              onChange={(e) => setT_a(parseFloat(e.target.value))}
+              onChange={(e) => setT_a(parseFloat(e.target.value) || 0)}
               inputProps={{ step: 0.01, min: -0.5, max: 0.5 }}
               disabled={loading}
+              fullWidth
             />
           </Grid>
         </Grid>
       </Box>
 
       <Box sx={{ mb: 4 }}>
-        <Typography gutterBottom>
-          t_b (Next-nearest-neighbor hopping): {t_b.toFixed(3)}
-        </Typography>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+          <Typography sx={{ fontWeight: 500 }}>
+            t_b (Next-nearest-neighbor)
+          </Typography>
+          <Chip 
+            label={t_b.toFixed(3)} 
+            color="secondary" 
+            size="small"
+            sx={{ fontWeight: 'bold', minWidth: 70 }}
+          />
+        </Box>
         <Grid container spacing={2} alignItems="center">
-          <Grid item xs={10}>
+          <Grid item xs={9}>
             <Slider
               value={t_b}
               onChange={(e, newValue) => setT_b(newValue)}
@@ -87,55 +106,62 @@ export default function ParameterControls({ onComputeDOS, onGenerateTarget, load
                 { value: 0.5, label: '0.5' },
               ]}
               disabled={loading}
+              color="secondary"
+              sx={{ '& .MuiSlider-markLabel': { fontSize: 11 } }}
             />
           </Grid>
-          <Grid item xs={2}>
+          <Grid item xs={3}>
             <TextField
               size="small"
               type="number"
               value={t_b}
-              onChange={(e) => setT_b(parseFloat(e.target.value))}
+              onChange={(e) => setT_b(parseFloat(e.target.value) || 0)}
               inputProps={{ step: 0.01, min: -0.5, max: 0.5 }}
               disabled={loading}
+              fullWidth
             />
           </Grid>
         </Grid>
       </Box>
 
-      <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+      <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 3 }}>
         <Button
           variant="contained"
           color="primary"
           startIcon={<PlayArrowIcon />}
           onClick={handleComputeDOS}
           disabled={loading}
+          size="large"
+          sx={{ flex: 1, minWidth: 140 }}
         >
           Compute DOS
         </Button>
         <Button
-          variant="outlined"
+          variant="contained"
           color="secondary"
           onClick={handleGenerateTarget}
           disabled={loading}
+          size="large"
+          sx={{ flex: 1, minWidth: 140 }}
         >
           Set as Target
         </Button>
       </Box>
 
-      <Box sx={{ mt: 2, p: 2, bgcolor: 'background.default', borderRadius: 1 }}>
-        <Typography variant="caption" display="block" gutterBottom>
-          <strong>Physical Meaning:</strong>
+      <Paper variant="outlined" sx={{ p: 2, bgcolor: 'info.lighter' }}>
+        <Typography variant="caption" display="block" sx={{ fontWeight: 600, mb: 1 }}>
+          📚 Physical Meaning
         </Typography>
-        <Typography variant="caption" display="block" color="text.secondary">
-          • t_a: Nearest-neighbor hopping amplitude
+        <Typography variant="caption" display="block" color="text.secondary" sx={{ lineHeight: 1.6 }}>
+          <strong>t_a:</strong> Nearest-neighbor hopping amplitude
         </Typography>
-        <Typography variant="caption" display="block" color="text.secondary">
-          • t_b: Next-nearest-neighbor hopping amplitude
+        <Typography variant="caption" display="block" color="text.secondary" sx={{ lineHeight: 1.6 }}>
+          <strong>t_b:</strong> Next-nearest-neighbor hopping amplitude
         </Typography>
-        <Typography variant="caption" display="block" color="text.secondary">
-          • Negative values indicate electron hopping between sites
+        <Typography variant="caption" display="block" color="text.secondary" sx={{ lineHeight: 1.6 }}>
+          Negative values indicate favorable electron hopping between lattice sites
         </Typography>
-      </Box>
+      </Paper>
     </Paper>
   );
 }

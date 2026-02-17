@@ -38,7 +38,7 @@ warnings.filterwarnings('ignore', category=BadInitialCandidatesWarning)
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for all routes
 
 # Global configuration
 tkwargs = {
@@ -73,7 +73,8 @@ optimization_state = {
     'sampler': None,
     'history': [],
     'dos_target': None,
-    'bins_target': None
+    'bins_target': None,
+    'iteration_snapshots': []  # Store state at each iteration
 }
 
 
@@ -114,14 +115,48 @@ def compute_dos(t_a, t_b, d=0.133, bins=800, energy_range=(-0.15, 0.25),
     eigenvalues = []
     for kx in kx_vals:
         for ky in ky_vals:
-            H = kagome_hamiltonian([kx, ky], t_a, t_b, d)
-            eigvals = np.linalg.eigvalsh(H)
-            eigenvalues.extend(eigvals)
+            try:
+                H = kagome_hamiltonian([kx, ky], t_a, t_b, d)
+                eigvals = np.linalg.eigvalsh(H)
+                
+                # Check for NaN or Inf in eigenvalues
+                if not (np.isnan(eigvals).any() or np.isinf(eigvals).any()):
+                    eigenvalues.extend(eigvals)
+            except Exception as e:
+                # Skip this k-point if calculation fails
+                continue
+    
+    if len(eigenvalues) == 0:
+        # No valid eigenvalues, return zero DOS
+        print(f"  Warning: No valid eigenvalues for t_a={t_a:.4f}, t_b={t_b:.4f}")
+        counts = np.zeros(bins)
+        bin_edges = np.linspace(energy_range[0], energy_range[1], bins + 1)
+        return counts, bin_edges
     
     eigenvalues = np.array(eigenvalues)
+    
+    # Remove any NaN or Inf values
+    eigenvalues = eigenvalues[~np.isnan(eigenvalues)]
+    eigenvalues = eigenvalues[~np.isinf(eigenvalues)]
+    
+    if len(eigenvalues) == 0:
+        # All eigenvalues were invalid
+        print(f"  Warning: All eigenvalues invalid for t_a={t_a:.4f}, t_b={t_b:.4f}")
+        counts = np.zeros(bins)
+        bin_edges = np.linspace(energy_range[0], energy_range[1], bins + 1)
+        return counts, bin_edges
+    
     counts, bin_edges = np.histogram(eigenvalues, bins=bins, 
                                      range=energy_range, density=True)
+    
+    # Replace NaN with 0
+    counts = np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    # Apply Gaussian smoothing
     counts = gaussian_filter1d(counts, sigma=sigma)
+    
+    # Final NaN check
+    counts = np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
     
     return counts, bin_edges
 
@@ -174,7 +209,7 @@ def compute_train_obj(x, dos_target, bins_target, metric='mse'):
     
     for i in range(x.shape[0]):
         params = x[i].cpu().numpy()
-        t_a, t_b = params[0], params[1]
+        t_a, t_b = float(params[0]), float(params[1])
         
         # Check bounds
         if t_a < lower_bound[0].item() or t_a > upper_bound[0].item():
@@ -186,18 +221,59 @@ def compute_train_obj(x, dos_target, bins_target, metric='mse'):
         
         try:
             # Compute DOS
-            dos_current, _ = compute_dos(t_a, t_b, n_kpoints=500)
+            dos_current, _ = compute_dos(t_a, t_b, n_kpoints=200)
+            
+            # Check for NaN or Inf in DOS
+            if np.isnan(dos_current).any():
+                print(f"  Warning: NaN in DOS for t_a={t_a:.4f}, t_b={t_b:.4f}")
+                objectives.append(-1000.0)
+                continue
+            
+            if np.isinf(dos_current).any():
+                print(f"  Warning: Inf in DOS for t_a={t_a:.4f}, t_b={t_b:.4f}")
+                objectives.append(-1000.0)
+                continue
+            
+            # Check if DOS is all zeros
+            if np.sum(np.abs(dos_current)) < 1e-10:
+                print(f"  Warning: Zero DOS for t_a={t_a:.4f}, t_b={t_b:.4f}")
+                objectives.append(-1000.0)
+                continue
+            
+            # Ensure same length
+            if len(dos_current) != len(dos_target):
+                # Interpolate to match target length
+                from scipy.interpolate import interp1d
+                x_old = np.linspace(0, 1, len(dos_current))
+                x_new = np.linspace(0, 1, len(dos_target))
+                f = interp1d(x_old, dos_current, kind='linear', fill_value='extrapolate')
+                dos_current = f(x_new)
             
             # Compute distance
             distance = compute_dos_distance(dos_target, dos_current, metric=metric)
             
+            # Check for NaN in distance
+            if np.isnan(distance) or np.isinf(distance):
+                print(f"  Warning: Invalid distance for t_a={t_a:.4f}, t_b={t_b:.4f}")
+                objectives.append(-1000.0)
+                continue
+            
             # Return negative (for maximization)
             objectives.append(-distance)
+            
         except Exception as e:
-            print(f"Error computing objective for {params}: {e}")
+            print(f"  Error computing objective for t_a={t_a:.4f}, t_b={t_b:.4f}: {e}")
             objectives.append(-1000.0)
     
-    return torch.tensor(objectives, **tkwargs).unsqueeze(-1)
+    # Convert to tensor and check for NaN
+    obj_tensor = torch.tensor(objectives, dtype=tkwargs['dtype'], device=tkwargs['device']).unsqueeze(-1)
+    
+    # Replace any remaining NaN with penalty value
+    obj_tensor = torch.where(torch.isnan(obj_tensor), 
+                             torch.tensor(-1000.0, **tkwargs), 
+                             obj_tensor)
+    
+    return obj_tensor
 
 
 def initialize_model(train_x, train_obj):
@@ -290,15 +366,49 @@ def api_start_optimization():
     """Start Bayesian Optimization with PyTorch/BoTorch"""
     global optimization_state
     
-    if optimization_state['is_running']:
-        return jsonify({'error': 'Optimization already running'}), 400
-    
-    data = request.json
-    dos_target = np.array(data['dos_target'])
-    bins_target = np.array(data['bins_target'])
-    n_initial = int(data.get('n_initial', 10))
-    n_iterations = int(data.get('n_iterations', 20))
-    metric = data.get('metric', 'mse')  # 'mse' or 'wasserstein'
+    try:
+        # Allow restart if optimization was completed
+        if optimization_state['is_running']:
+            if optimization_state['current_iteration'] >= optimization_state['total_iterations']:
+                # Reset for new optimization
+                print("DEBUG: Resetting completed optimization for restart")
+                optimization_state['is_running'] = False
+            else:
+                return jsonify({
+                    'error': 'Optimization already running',
+                    'current_iteration': optimization_state['current_iteration'],
+                    'total_iterations': optimization_state['total_iterations']
+                }), 400
+        
+        data = request.json
+        print(f"\n{'='*70}")
+        print("DEBUG: Received optimization request")
+        print(f"  Data keys: {list(data.keys())}")
+        print(f"  dos_target length: {len(data.get('dos_target', []))}")
+        print(f"  bins_target length: {len(data.get('bins_target', []))}")
+        print(f"  n_initial: {data.get('n_initial')}")
+        print(f"  n_iterations: {data.get('n_iterations')}")
+        
+        dos_target = np.array(data['dos_target'])
+        bins_target = np.array(data['bins_target'])
+        
+        print(f"  dos_target shape: {dos_target.shape}")
+        print(f"  dos_target type: {dos_target.dtype}")
+        print(f"  dos_target has NaN: {np.isnan(dos_target).any()}")
+        print(f"  dos_target has Inf: {np.isinf(dos_target).any()}")
+        
+        n_initial = int(data.get('n_initial', 10))
+        n_iterations = int(data.get('n_iterations', 20))
+        metric = data.get('metric', 'mse')  # 'mse' or 'wasserstein'
+        
+        print(f"  Parsed parameters OK")
+        print(f"{'='*70}\n")
+        
+    except Exception as e:
+        print(f"\n❌ ERROR in request parsing: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Request parsing error: {str(e)}'}), 400
     
     optimization_state['is_running'] = True
     optimization_state['current_iteration'] = 0
@@ -308,37 +418,73 @@ def api_start_optimization():
     optimization_state['bins_target'] = bins_target
     optimization_state['metric'] = metric
     
-    # Generate initial points using Sobol sampling
-    train_x_qei = draw_sobol_samples(
-        bounds=standard_bounds, 
-        n=n_initial, 
-        q=1
-    ).squeeze(1)
+    try:
+        print("DEBUG: Generating initial points...")
+        # Generate initial points using Sobol sampling
+        train_x_qei = draw_sobol_samples(
+            bounds=standard_bounds, 
+            n=n_initial, 
+            q=1
+        ).squeeze(1)
+        print(f"  Sobol samples shape: {train_x_qei.shape}")
+        
+        # Unnormalize
+        train_x_qei = unnormalize(train_x_qei, bounds=torch.stack([lower_bound, upper_bound]))
+        print(f"  Unnormalized samples: {train_x_qei}")
+        
+    except Exception as e:
+        print(f"❌ ERROR in sampling: {e}")
+        import traceback
+        traceback.print_exc()
+        optimization_state['is_running'] = False
+        return jsonify({'error': f'Sampling error: {str(e)}'}), 500
     
-    # Unnormalize
-    train_x_qei = unnormalize(train_x_qei, bounds=torch.stack([lower_bound, upper_bound]))
+    try:
+        # Evaluate initial points
+        print(f"DEBUG: Evaluating {n_initial} initial points...")
+        print(f"  Using n_kpoints for DOS computation")
+        train_obj_qei = compute_train_obj(train_x_qei, dos_target, bins_target, metric=metric)
+        print(f"  Objectives computed: {train_obj_qei}")
+        
+    except Exception as e:
+        print(f"❌ ERROR in objective computation: {e}")
+        import traceback
+        traceback.print_exc()
+        optimization_state['is_running'] = False
+        return jsonify({'error': f'Objective computation error: {str(e)}'}), 500
     
-    # Evaluate initial points
-    print(f"Evaluating {n_initial} initial points...")
-    train_obj_qei = compute_train_obj(train_x_qei, dos_target, bins_target, metric=metric)
-    
-    # Add to history
-    for i, (x, obj) in enumerate(zip(train_x_qei, train_obj_qei)):
-        optimization_state['history'].append({
-            'iteration': 0,
-            'point': x.cpu().numpy().tolist(),
-            'objective': obj.item(),
-            'type': 'initial'
-        })
-    
-    # Initialize model
-    mll_qei, model_qei = initialize_model(train_x_qei, train_obj_qei)
-    
-    # Fit GP
-    fit_gpytorch_mll(mll_qei)
-    
-    # Initialize sampler
-    qei_sampler = SobolQMCNormalSampler(sample_shape=torch.Size([MC_SAMPLES]))
+    try:
+        # Add to history
+        for i, (x, obj) in enumerate(zip(train_x_qei, train_obj_qei)):
+            optimization_state['history'].append({
+                'iteration': 0,
+                'point': x.cpu().numpy().tolist(),
+                'objective': obj.item(),
+                'type': 'initial'
+            })
+        print("  History updated")
+        
+        # Initialize model
+        print("DEBUG: Initializing GP model...")
+        mll_qei, model_qei = initialize_model(train_x_qei, train_obj_qei)
+        print("  Model initialized")
+        
+        # Fit GP
+        print("DEBUG: Fitting GP...")
+        fit_gpytorch_mll(mll_qei)
+        print("  GP fitted")
+        
+        # Initialize sampler
+        print("DEBUG: Initializing sampler...")
+        qei_sampler = SobolQMCNormalSampler(sample_shape=torch.Size([MC_SAMPLES]))
+        print("  Sampler initialized")
+        
+    except Exception as e:
+        print(f"❌ ERROR in model initialization: {e}")
+        import traceback
+        traceback.print_exc()
+        optimization_state['is_running'] = False
+        return jsonify({'error': f'Model initialization error: {str(e)}'}), 500
     
     # Store state
     optimization_state['train_x'] = train_x_qei
@@ -351,6 +497,23 @@ def api_start_optimization():
     sorted_indices = torch.argsort(train_obj_qei.squeeze(), descending=True)[:5]
     best_points = train_x_qei[sorted_indices].cpu().numpy().tolist()
     best_objectives = train_obj_qei[sorted_indices].cpu().numpy().tolist()
+    
+    # Save initial snapshot (Iteration 0)
+    initial_snapshot = {
+        'iteration': 0,
+        'best_points': best_points,
+        'best_objectives': best_objectives,
+        'n_evaluated': len(train_x_qei),
+        'train_x': train_x_qei.cpu().numpy().tolist(),
+        'train_obj': train_obj_qei.cpu().numpy().tolist(),
+        'new_points': [],  # No new points in initialization
+    }
+    optimization_state['iteration_snapshots'] = [initial_snapshot]  # Reset and add initial
+    
+    print("DEBUG: Optimization initialized successfully!")
+    print(f"  Best objective: {best_objectives[0][0]:.6f}")
+    print(f"  Saved initial snapshot (Iteration 0)")
+    print(f"{'='*70}\n")
     
     return jsonify({
         'status': 'initialized',
@@ -440,6 +603,21 @@ def api_step_optimization():
                                       descending=True)[:5]
         best_points = optimization_state['train_x'][sorted_indices].cpu().numpy().tolist()
         best_objectives = optimization_state['train_obj'][sorted_indices].cpu().numpy().tolist()
+        
+        # Save iteration snapshot with complete data
+        snapshot = {
+            'iteration': optimization_state['current_iteration'],
+            'best_points': best_points,
+            'best_objectives': best_objectives,
+            'n_evaluated': len(optimization_state['train_x']),
+            'train_x': optimization_state['train_x'].cpu().numpy().tolist(),
+            'train_obj': optimization_state['train_obj'].cpu().numpy().tolist(),
+            'new_points': new_x.cpu().numpy().tolist(),  # Save new points for visualization
+        }
+        optimization_state['iteration_snapshots'].append(snapshot)
+        
+        # Also save new_x in current state for immediate visualization
+        optimization_state['last_new_points'] = new_x.cpu().numpy()
         
         return jsonify({
             'status': 'running',
@@ -542,6 +720,283 @@ def api_plot_comparison():
     
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    buf.seek(0)
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    plt.close()
+    
+    return jsonify({'image': img_base64})
+
+
+@app.route('/api/get_parameter_space', methods=['POST'])
+def api_get_parameter_space():
+    """
+    Generate parameter space visualization plot
+    生成参数空间可视化图
+    """
+    if not optimization_state['model']:
+        return jsonify({'error': 'No model available. Run optimization first.'}), 400
+    
+    data = request.json
+    resolution = int(data.get('resolution', 100))
+    iteration_num = data.get('iteration')  # Can be None for current
+    
+    try:
+        print(f"\nDEBUG: Generating parameter space plot (resolution={resolution}, iteration={iteration_num})")
+        
+        # Determine which data to use
+        use_snapshot = False
+        new_points = np.array([])
+        
+        if iteration_num is not None and iteration_num > 0:
+            # Try to get historical snapshot
+            if iteration_num <= len(optimization_state['iteration_snapshots']):
+                snapshot = optimization_state['iteration_snapshots'][iteration_num - 1]
+                train_x = np.array(snapshot.get('train_x', []))
+                train_obj = np.array(snapshot.get('train_obj', []))
+                top5_points = np.array(snapshot.get('best_points', []))
+                new_points = np.array(snapshot.get('new_points', []))
+                use_snapshot = True
+                print(f"  Using historical snapshot: Iteration {iteration_num}")
+                print(f"  Train points in snapshot: {len(train_x)}")
+            else:
+                print(f"  Iteration {iteration_num} not found in history")
+                use_snapshot = False
+        
+        if not use_snapshot:
+            # Use current state
+            train_x = optimization_state['train_x'].cpu().numpy()
+            train_obj = optimization_state['train_obj'].cpu().numpy()
+            sorted_indices = torch.argsort(
+                optimization_state['train_obj'].squeeze(), 
+                descending=True
+            )[:5]
+            top5_points = optimization_state['train_x'][sorted_indices].cpu().numpy()
+            new_points = optimization_state.get('last_new_points', np.array([]))
+            iteration_num = optimization_state['current_iteration']
+            print(f"  Using current state: Iteration {iteration_num}")
+        
+        # Create grid
+        t_a_grid = np.linspace(-0.5, 0.5, resolution)
+        t_b_grid = np.linspace(-0.5, 0.5, resolution)
+        T_a, T_b = np.meshgrid(t_a_grid, t_b_grid)
+        
+        # Generate predictions
+        if use_snapshot:
+            # For historical iterations, use interpolation (GP model state not available)
+            print("  Using interpolation for historical iteration")
+            from scipy.interpolate import griddata
+            
+            # Interpolate mean
+            points_2d = train_x[:, :2] if train_x.ndim > 1 else train_x
+            values = train_obj.flatten() if train_obj.ndim > 1 else train_obj
+            
+            mean = griddata(points_2d, values, (T_a, T_b), 
+                           method='linear', fill_value=values.min())
+            
+            # Estimate uncertainty based on distance to nearest point
+            from scipy.spatial.distance import cdist
+            grid_flat = np.c_[T_a.ravel(), T_b.ravel()]
+            distances = cdist(grid_flat, points_2d)
+            min_distances = distances.min(axis=1)
+            std = min_distances.reshape(resolution, resolution) * 100  # Scale for visibility
+        else:
+            # For current iteration, use GP model
+            print("  Using GP model for current iteration")
+            grid_points = torch.tensor(
+                np.c_[T_a.ravel(), T_b.ravel()],
+                dtype=tkwargs['dtype'],
+                device=tkwargs['device']
+            )
+            
+            with torch.no_grad():
+                try:
+                    optimization_state['model'].eval()
+                    posterior = optimization_state['model'].posterior(grid_points)
+                    mean = posterior.mean.cpu().numpy().reshape(resolution, resolution)
+                    variance = posterior.variance.cpu().numpy().reshape(resolution, resolution)
+                    std = np.sqrt(variance)
+                except Exception as e:
+                    print(f"  Warning: GP prediction failed, using interpolation: {e}")
+                    from scipy.interpolate import griddata
+                    mean = griddata(train_x, train_obj.flatten(), 
+                                   (T_a, T_b), method='linear', fill_value=-1000)
+                    std = np.ones_like(mean) * 0.1
+        
+        print(f"  Mean range: [{mean.min():.6f}, {mean.max():.6f}]")
+        print(f"  Std range: [{std.min():.6f}, {std.max():.6f}]")
+        
+        # Create matplotlib figure
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        
+        # Left: Mean
+        ax1 = axes[0]
+        contour1 = ax1.contourf(T_a, T_b, mean, levels=20, cmap='RdYlBu_r')
+        plt.colorbar(contour1, ax=ax1, label='Mean Objective')
+        ax1.contour(T_a, T_b, mean, levels=10, colors='black', alpha=0.2, linewidths=0.5)
+        
+        ax1.scatter(train_x[:, 0], train_x[:, 1],
+                   c='blue', marker='o', s=60, 
+                   edgecolors='white', linewidths=1.5,
+                   label='Evaluated Points', zorder=3)
+        
+        # Plot new points (black triangles) if available
+        if len(new_points) > 0:
+            ax1.scatter(new_points[:, 0], new_points[:, 1],
+                       c='black', marker='v', s=120,
+                       edgecolors='yellow', linewidths=2,
+                       label='New Points', zorder=4)
+        
+        ax1.scatter(top5_points[:, 0], top5_points[:, 1],
+                   c='red', marker='D', s=120,
+                   edgecolors='white', linewidths=2,
+                   label='Top 5', zorder=5)
+        
+        ax1.scatter([-0.3], [-0.2],
+                   c='gold', marker='*', s=400,
+                   edgecolors='black', linewidths=2,
+                   label='Target', zorder=6)
+        
+        ax1.set_xlabel('t_a (Nearest-neighbor)', fontsize=13, fontweight='bold')
+        ax1.set_ylabel('t_b (Next-nearest)', fontsize=13, fontweight='bold')
+        ax1.set_title(f'Mean Prediction - Iteration {iteration_num}', fontsize=14, fontweight='bold')
+        ax1.legend(loc='upper right', fontsize=11, framealpha=0.9)
+        ax1.set_xlim([-0.5, 0.5])
+        ax1.set_ylim([-0.5, 0.5])
+        ax1.grid(True, alpha=0.3)
+        
+        # Right: Uncertainty
+        ax2 = axes[1]
+        contour2 = ax2.contourf(T_a, T_b, std, levels=20, cmap='Greens')
+        plt.colorbar(contour2, ax=ax2, label='Uncertainty (Std)')
+        ax2.contour(T_a, T_b, std, levels=10, colors='black', alpha=0.2, linewidths=0.5)
+        
+        ax2.scatter(train_x[:, 0], train_x[:, 1],
+                   c='blue', marker='o', s=60,
+                   edgecolors='white', linewidths=1.5,
+                   label='Evaluated Points', zorder=3)
+        
+        # Plot new points (black triangles) if available
+        if len(new_points) > 0:
+            ax2.scatter(new_points[:, 0], new_points[:, 1],
+                       c='black', marker='v', s=120,
+                       edgecolors='yellow', linewidths=2,
+                       label='New Points', zorder=4)
+        
+        ax2.scatter(top5_points[:, 0], top5_points[:, 1],
+                   c='red', marker='D', s=120,
+                   edgecolors='white', linewidths=2,
+                   label='Top 5', zorder=5)
+        
+        ax2.scatter([-0.3], [-0.2],
+                   c='gold', marker='*', s=400,
+                   edgecolors='black', linewidths=2,
+                   label='Target', zorder=6)
+        
+        ax2.set_xlabel('t_a (Nearest-neighbor)', fontsize=13, fontweight='bold')
+        ax2.set_ylabel('t_b (Next-nearest)', fontsize=13, fontweight='bold')
+        ax2.set_title(f'Uncertainty - Iteration {iteration_num}', fontsize=14, fontweight='bold')
+        ax2.legend(loc='upper right', fontsize=11, framealpha=0.9)
+        ax2.set_xlim([-0.5, 0.5])
+        ax2.set_ylim([-0.5, 0.5])
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # Convert to base64
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+        buf.seek(0)
+        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close()
+        
+        print(f"  Parameter space plot generated successfully")
+        
+        return jsonify({
+            'image': img_base64,
+            'current_iteration': iteration_num,
+            'n_points': len(train_x)
+        })
+        
+    except Exception as e:
+        print(f"❌ ERROR in parameter space generation: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/get_iteration_history', methods=['GET'])
+def api_get_iteration_history():
+    """
+    Get all iteration snapshots
+    获取所有迭代快照
+    """
+    if not optimization_state['iteration_snapshots']:
+        return jsonify({
+            'iterations': [],
+            'message': 'No iteration history available'
+        })
+    
+    return jsonify({
+        'iterations': optimization_state['iteration_snapshots'],
+        'current_iteration': optimization_state['current_iteration'],
+        'total_iterations': optimization_state['total_iterations']
+    })
+
+
+@app.route('/api/plot_multi_dos', methods=['POST'])
+def api_plot_multi_dos():
+    """
+    Generate multi-panel DOS comparison (like original code)
+    生成多面板DOS对比图（与原始代码相同）
+    Shows Target, BO Suggested, and Final (after local opt) DOS
+    """
+    data = request.json
+    dos_target = np.array(data['dos_target'])
+    bins_target = np.array(data['bins_target'])
+    candidates = data['candidates']  # List of top candidates
+    
+    n_plots = len(candidates)
+    fig, axes = plt.subplots(1, n_plots, figsize=(5*n_plots, 5), sharey=True)
+    if n_plots == 1:
+        axes = [axes]
+    
+    for i, (ax, candidate) in enumerate(zip(axes, candidates)):
+        point = candidate['point']
+        
+        # Normalize target DOS for display
+        integral_target = np.trapz(dos_target, bins_target[:-1])
+        
+        # Plot target DOS (red)
+        ax.plot(bins_target[:-1], dos_target, 'r-', linewidth=3, label='Target DOS')
+        
+        # Compute BO suggested DOS (black)
+        dos_bo, bins_bo = compute_dos(point[0], point[1], n_kpoints=800)
+        ax.plot(bins_bo[:-1], dos_bo * integral_target, 'k-', linewidth=3, 
+               label='BO Suggested DOS')
+        
+        # If local optimization was performed, show final DOS (blue)
+        if 'optimized_point' in candidate:
+            opt_point = candidate['optimized_point']
+            dos_final, bins_final = compute_dos(opt_point[0], opt_point[1], n_kpoints=800)
+            ax.plot(bins_final[:-1], dos_final * integral_target, 'b-', linewidth=3,
+                   label='Final DOS')
+        
+        ax.set_xlabel('Bias Voltage (eV)', fontsize=14)
+        if i == 0:
+            ax.set_ylabel('Normalized dI/dV (arb.)', fontsize=14)
+        ax.legend(loc='upper right', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim([-0.15, 0.25])
+        ax.tick_params(axis='both', labelsize=12)
+        
+        # Add rank title
+        ax.set_title(f'Rank #{i+1}', fontsize=15, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    # Convert to base64
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
     buf.seek(0)
     img_base64 = base64.b64encode(buf.read()).decode('utf-8')
     plt.close()

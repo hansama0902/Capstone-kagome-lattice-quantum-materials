@@ -112,6 +112,31 @@ export const kagomeAPI = {
     });
     return response.data;
   },
+
+  /**
+   * Get parameter space visualization data
+   * 获取参数空间可视化数据
+   */
+  async getParameterSpace(resolution = 50, iteration = null) {
+    const response = await apiClient.post('/api/get_parameter_space', {
+      resolution,
+      iteration,  // Pass selected iteration number
+    });
+    return response.data;
+  },
+
+  /**
+   * Generate multi-panel DOS comparison (Top 5)
+   * 生成多面板DOS对比（Top 5候选点）
+   */
+  async getMultiDOSPlot(dos_target, bins_target, candidates) {
+    const response = await apiClient.post('/api/plot_multi_dos', {
+      dos_target,
+      bins_target,
+      candidates,
+    });
+    return response.data;
+  },
 };
 
 export default kagomeAPI;

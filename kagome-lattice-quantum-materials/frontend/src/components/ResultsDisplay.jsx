@@ -56,18 +56,17 @@ export default function ResultsDisplay({
 
   return (
     <Paper elevation={3} sx={{ p: 3 }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-        <EmojiEventsIcon sx={{ mr: 1, color: 'gold' }} />
-        <Typography variant="h6">
+      <Box sx={{ display: 'flex', alignItems: 'center', mb: 3 }}>
+        <EmojiEventsIcon sx={{ mr: 1, fontSize: 32, color: 'warning.main' }} />
+        <Typography variant="h5" sx={{ fontWeight: 600 }}>
           Best Candidates
         </Typography>
       </Box>
 
       {targetParameters && (
-        <Box sx={{ mb: 2, p: 2, bgcolor: 'info.light', borderRadius: 1 }}>
-          <Typography variant="body2">
-            <strong>True Parameters:</strong> t_a = {targetParameters.t_a.toFixed(3)}, 
-            t_b = {targetParameters.t_b.toFixed(3)}
+        <Box sx={{ mb: 3, p: 2, bgcolor: 'success.light', borderRadius: 1, border: '2px solid', borderColor: 'success.main' }}>
+          <Typography variant="body1" sx={{ fontWeight: 600, color: 'success.dark' }}>
+            🎯 True Parameters: t_a = {targetParameters.t_a.toFixed(3)}, t_b = {targetParameters.t_b.toFixed(3)}
           </Typography>
         </Box>
       )}

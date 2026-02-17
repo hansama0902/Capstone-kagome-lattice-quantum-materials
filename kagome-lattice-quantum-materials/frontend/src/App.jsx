@@ -26,6 +26,8 @@ import DOSComparison from './components/DOSComparison';
 import ParameterControls from './components/ParameterControls';
 import OptimizationPanel from './components/OptimizationPanel';
 import ResultsDisplay from './components/ResultsDisplay';
+import ParameterSpaceViz from './components/ParameterSpaceViz';
+import MultiDOSComparison from './components/MultiDOSComparison';
 
 // Create theme
 const theme = createTheme({
@@ -48,6 +50,7 @@ function App() {
   const [targetDOS, setTargetDOS] = useState(null);
   const [optimizationResults, setOptimizationResults] = useState(null);
   const [optimizationStatus, setOptimizationStatus] = useState(null);
+  const [parameterSpace, setParameterSpace] = useState(null);
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
 
   // Check backend health on mount
@@ -190,6 +193,32 @@ function App() {
     }
   };
 
+  // Fetch parameter space visualization
+  const handleFetchParameterSpace = async () => {
+    if (!optimizationResults) {
+      return null;
+    }
+    
+    try {
+      const data = await kagomeAPI.getParameterSpace(100);
+      return data;
+    } catch (error) {
+      console.error('Error fetching parameter space:', error);
+      return { error: error.message };
+    }
+  };
+
+  // Generate multi-DOS comparison plot
+  const handleGenerateMultiPlot = async (dos_target, bins_target, candidates) => {
+    try {
+      const data = await kagomeAPI.getMultiDOSPlot(dos_target, bins_target, candidates);
+      return data;
+    } catch (error) {
+      console.error('Error generating multi DOS plot:', error);
+      return { error: error.message };
+    }
+  };
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -285,6 +314,24 @@ function App() {
                   optimizationResults={optimizationResults}
                   targetParameters={targetDOS?.true_parameters}
                   onLocalOptimize={handleLocalOptimize}
+                />
+              )}
+
+              {/* Multi-Candidate DOS Comparison */}
+              {optimizationResults && targetDOS && (
+                <MultiDOSComparison
+                  targetDOS={targetDOS}
+                  optimizationResults={optimizationResults}
+                  onGenerateMultiPlot={handleGenerateMultiPlot}
+                />
+              )}
+
+              {/* Parameter Space Visualization */}
+              {optimizationResults && (
+                <ParameterSpaceViz
+                  optimizationResults={optimizationResults}
+                  targetParameters={targetDOS?.true_parameters}
+                  onFetchParameterSpace={handleFetchParameterSpace}
                 />
               )}
             </Box>
